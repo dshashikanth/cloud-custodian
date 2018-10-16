@@ -21,6 +21,7 @@ import datetime
 import itertools
 import logging
 import os
+import operator
 import shutil
 import sys
 import tempfile
@@ -58,11 +59,10 @@ log = logging.getLogger('custodian.aws')
 try:
     from aws_xray_sdk.core import xray_recorder, patch
     from aws_xray_sdk.core.context import Context
-    from aws_xray_sdk.core.sampling.local.sampler import LocalSampler
     HAVE_XRAY = True
 except ImportError:
     HAVE_XRAY = False
-    class Context: pass  # NOQA
+    class Context(object): pass  # NOQA
 
 _profile_session = None
 
@@ -191,7 +191,6 @@ class XrayContext(Context):
 
     def __init__(self, *args, **kw):
         super(XrayContext, self).__init__(*args, **kw)
-        self.sampler = LocalSampler()
         # We want process global semantics as policy execution
         # can span threads.
         self._local = Bag()
@@ -421,8 +420,12 @@ class AWS(object):
             options.regions, policy_collection.resource_types)
 
         for p in policy_collection:
+            if 'aws.' in p.resource_type:
+                _, resource_type = p.resource_type.split('.', 1)
+            else:
+                resource_type = p.resource_type
             available_regions = service_region_map.get(
-                resource_service_map.get(p.resource_type), ())
+                resource_service_map.get(resource_type), ())
 
             # its a global service/endpoint, use user provided region
             # or us-east-1.
@@ -454,7 +457,13 @@ class AWS(object):
                 policies.append(
                     Policy(p.data, options_copy,
                            session_factory=policy_collection.session_factory()))
-        return PolicyCollection(policies, options)
+
+        return PolicyCollection(
+            # order policies by region to minimize local session invalidation.
+            # note relative ordering of policies must be preserved, python sort
+            # is stable.
+            sorted(policies, key=operator.attrgetter('options.region')),
+            options)
 
 
 def get_service_region_map(regions, resource_types):
